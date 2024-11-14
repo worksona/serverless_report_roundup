@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Document Analysis Tool</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://unpkg.com/tesseract.js@v2.1.0/dist/tesseract.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <script type="module">
+        import { createApp, ref, watch, computed } from 'https://unpkg.com/vue@3/dist/vue.esm-browser.js';
+
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+        const MODELS = {
+            'gpt-4': {
+                name: 'GPT-4',
+                inputPrice: 0.03,
+                outputPrice: 0.06
+            },
+            'gpt-3.5-turbo': {
+                name: 'GPT-3.5 Turbo',
+                inputPrice: 0.0005,
+                outputPrice: 0.0015
+            }
+        };
+
+        const ANALYSES = {
+            text: [
+                { id: 'summary', name: 'Summary', description: 'Generate a concise summary' },
+                { id: 'key-points', name: 'Key Points', description: 'Extract main ideas' },
+                { id: 'sentiment', name: 'Sentiment', description: 'Analyze emotional tone' }
+            ],
+            document: [
+                { id: 'structure', name: 'Structure', description: 'Analyze document organization' },
+                { id: 'topics', name: 'Topics', description: 'Identify main themes' }
+            ]
+        };
+
+        const app = createApp({
+            setup() {
+                const selectedAnalyses = ref([]);
+                const apiKey = ref('');
+                const fileContent = ref('');
+                const manualContent = ref('');
+                const results = ref({});
+                const loading = ref(false);
+                const error = ref('');
+                const processingStatus = ref({});
+                const selectedModel = ref('gpt-3.5-turbo');
+
+                async function runAnalyses() {
+                    if (!apiKey.value) {
+                        error.value = 'Please enter your OpenAI API key';
+                        return;
+                    }
+                    if (selectedAnalyses.value.length === 0) {
+                        error.value = 'Please select at least one analysis type';
+                        return;
+                    }
+                    
+                    const content = fileContent.value || manualContent.value;
+                    if (!content) {
+                        error.value = 'Please upload a file or enter text to analyze';
+                        return;
+                    }
+
+                    loading.value = true;
+                    error.value = '';
+                    results.value = {};
+
+                    try {
+                        for (const analysisId of selectedAnalyses.value) {
+                            processingStatus.value[analysisId] = 'processing';
+                            
+                            try {
+                                const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        'Authorization': `Bearer ${apiKey.value}`
+                                    },
+                                    body: JSON.stringify({
+                                        model: selectedModel.value,
+                                        messages: [
+                                            {
+                                                role: 'system',
+                                                content: `You are an expert at ${analysisId} analysis. Provide a detailed analysis.`
+                                            },
+                                            {
+                                                role: 'user',
+                                                content: content
+                                            }
+                                        ],
+                                        temperature: 0.7,
+                                        max_tokens: 2000
+                                    })
+                                });
+
+                                if (!response.ok) {
+                                    const errorData = await response.json();
+                                    throw new Error(errorData.error?.message || `HTTP error! status: ${response.status}`);
+                                }
+
+                                const data = await response.json();
+                                results.value[analysisId] = {
+                                    content: data.choices[0].message.content,
+                                    tokens: data.usage
+                                };
+                                
+                                processingStatus.value[analysisId] = 'completed';
+                            } catch (err) {
+                                console.error(`Analysis failed for ${analysisId}:`, err);
+                                processingStatus.value[analysisId] = 'error';
+                                error.value = `Analysis failed for ${analysisId}: ${err.message}`;
+                            }
+                        }
+                    } finally {
+                        loading.value = false;
+                    }
+                }
+
+                function handleFileUpload(event) {
+                    const file = event.target.files[0];
+                    if (file) {
+                        readFileContent(file)
+                            .then(content => {
+                                fileContent.value = content;
+                            })
+                            .catch(err => {
+                                error.value = `Error reading file: ${err.message}`;
+                            });
+                    }
+                }
+
+                function toggleAnalysis(analysisId) {
+                    const index = selectedAnalyses.value.indexOf(analysisId);
+                    if (index === -1) {
+                        selectedAnalyses.value.push(analysisId);
+                    } else {
+                        selectedAnalyses.value.splice(index, 1);
+                    }
+                }
+
+                return {
+                    ANALYSES,
+                    MODELS,
+                    selectedAnalyses,
+                    apiKey,
+                    fileContent,
+                    manualContent,
+                    results,
+                    loading,
+                    error,
+                    processingStatus,
+                    selectedModel,
+                    handleFileUpload,
+                    toggleAnalysis,
+                    runAnalyses
+                };
+            }
+        });
+
+        app.mount('#app');
+
+        async function readFileContent(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    try {
+                        let content = '';
+                        if (file.type.includes('pdf')) {
+                            const data = new Uint8Array(e.target.result);
+                            const pdf = await pdfjsLib.getDocument({ data }).promise;
+                            const numPages = pdf.numPages;
+                            const textContent = [];
+                            for (let i = 1; i <= numPages; i++) {
+                                const page = await pdf.getPage(i);
+                                const text = await page.getTextContent();
+                                textContent.push(text.items.map(item => item.str).join(' '));
+                            }
+                            content = textContent.join('\n\n');
+                        } else if (file.type.includes('image')) {
+                            const result = await Tesseract.recognize(e.target.result);
+                            content = result.data.text;
+                        } else {
+                            content = e.target.result;
+                        }
+                        resolve(content);
+                    } catch (err) {
+                        reject(err);
+                    }
+                };
+                reader.onerror = () => reject(reader.error);
+                
+                if (file.type.includes('text')) {
+                    reader.readAsText(file);
+                } else {
+                    reader.readAsArrayBuffer(file);
+                }
+            });
+        }
+    </script>
+</head>
+<body class="bg-gray-50">
+    <div id="app" class="container mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6 text-center">Document Analysis Tool</h1>
+        
+        <div v-if="error" class="mb-4 p-4 bg-red-100 text-red-700 rounded">
+            {{ error }}
+        </div>
+
+        <div class="mb-6">
+            <input type="password" 
+                   v-model="apiKey"
+                   placeholder="Enter OpenAI API Key"
+                   class="w-full p-2 border rounded mb-4"/>
+            
+            <div class="mb-4">
+                <label class="block mb-2">Select Model:</label>
+                <select v-model="selectedModel" class="w-full p-2 border rounded">
+                    <option v-for="(model, id) in MODELS" :key="id" :value="id">
+                        {{ model.name }} (${{ model.inputPrice }}/1K input tokens)
+                    </option>
+                </select>
+            </div>
+
+            <div class="mb-4">
+                <label class="block mb-2">Analysis Types:</label>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div v-for="(analyses, category) in ANALYSES" :key="category" class="bg-white p-4 rounded shadow">
+                        <h3 class="font-bold mb-2 capitalize">{{ category }} Analysis</h3>
+                        <div v-for="analysis in analyses" :key="analysis.id" 
+                             class="flex items-center p-2 hover:bg-gray-50 rounded cursor-pointer"
+                             :class="{ 'bg-blue-50': selectedAnalyses.includes(analysis.id) }"
+                             @click="toggleAnalysis(analysis.id)">
+                            <div>
+                                <div class="font-medium">{{ analysis.name }}</div>
+                                <div class="text-sm text-gray-600">{{ analysis.description }}</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mb-4">
+                <label class="block mb-2">Upload File or Enter Text:</label>
+                <input type="file" 
+                       @change="handleFileUpload"
+                       class="w-full p-2 border rounded mb-4"
+                       accept=".pdf,.txt,.jpg,.jpeg,.png"/>
+                
+                <textarea v-model="manualContent"
+                          placeholder="Or enter text here to analyze..."
+                          class="w-full p-2 border rounded mb-4 h-32"></textarea>
+            </div>
+
+            <button @click="runAnalyses"
+                    :disabled="loading"
+                    class="w-full p-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400">
+                {{ loading ? 'Analyzing...' : 'Run Analysis' }}
+            </button>
+        </div>
+
+        <div v-if="Object.keys(results).length > 0" class="mt-8">
+            <h2 class="text-2xl font-bold mb-4">Analysis Results</h2>
+            <div v-for="(result, analysisId) in results" :key="analysisId" 
+                 class="mb-6 p-4 bg-white rounded shadow">
+                <div class="flex justify-between items-start mb-2">
+                    <h3 class="font-bold">
+                        {{ [...Object.values(ANALYSES).flat()].find(a => a.id === analysisId)?.name }}
+                    </h3>
+                    <div class="text-sm text-gray-600">
+                        <div>Tokens: {{ result.tokens?.total_tokens || 0 }}</div>
+                    </div>
+                </div>
+                <pre class="whitespace-pre-wrap text-gray-700">{{ result.content }}</pre>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
